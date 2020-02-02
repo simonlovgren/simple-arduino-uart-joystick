@@ -83,7 +83,9 @@ extern "C"
 typedef enum command_id_enum_s
 {
     REQ_GET_INPUT = 0, /**< Get input state request */
-    RSP_GET_INPUT = 1  /**< Get input state response */
+    RSP_GET_INPUT = 1,  /**< Get input state response */
+
+    STATUS_ERROR  = 0xEE
 } command_id_enum_t;
 
 typedef uint8_t command_id_t;
@@ -105,6 +107,15 @@ typedef struct rsp_get_input_s
 {
     uint8_t input_state; /**< States of inputs as bit-vector */
 } rsp_get_input_t;
+
+/**
+ *  STATUSES
+ */
+typedef struct status_error_s
+{
+    uint8_t error;
+    uint8_t parserState;
+} status_error_t;
 
 #pragma pack()
 
@@ -131,6 +142,18 @@ typedef enum command_state_e
     COMMAND_RECEIVED     = 6,
     COMMAND_RESET        = 7
 } command_state_t;
+
+/**
+ *  @brief ERROR enum
+ */
+typedef enum error_enum_e
+{
+    ERROR_NO_ERROR = 0,
+    ERROR_BUFFER_FULL,
+    ERROR_TIMEOUT,
+    ERROR_HEADER_CRC,
+    ERROR_MESSAGE_CRC,
+} error_enum_t;
 
 /**
  * *********************************************************************************************************************
@@ -182,6 +205,12 @@ uint8_t read_inputs( void );
 bool create_message( uint8_t *pBuffer, uint32_t bufLen, command_id_t command_id, uint8_t *pPayload, uint32_t payload_len, uint32_t* pMsg_len );
 
 /**
+ * @brief       Sends error status to UART
+ * @returns     -
+ */
+void send_error( uint8_t error );
+
+/**
  * *********************************************************************************************************************
  * Local variables
  * *********************************************************************************************************************
@@ -197,6 +226,10 @@ static uint8_t inputs[] = { 4, 5, 6, 7 };
  */
 static uint8_t cmd_buffer[ 256 ];
 
+/**
+ * @brief Command parser state
+ */
+static uint8_t  state = WAIT_FOR_STX;
 
 /**
  * *********************************************************************************************************************
@@ -262,6 +295,28 @@ void loop( void )
  */
 
 /**
+ * @brief       Sends error status to UART
+ * @returns     -
+ */
+void send_error( uint8_t error )
+{
+    status_error_t payload;
+    payload.error = error;
+    payload.parserState = state;
+    static uint8_t response[256];
+    uint32_t msg_len = 0;
+    if ( create_message( (uint8_t *)&response, sizeof( response ), STATUS_ERROR, (uint8_t*)&payload, sizeof(payload), &msg_len ) )
+    {
+        Serial.write( response, msg_len );
+    }
+    else
+    {
+        Serial.println( "UNABLE TO CREATE MESSAGE" );
+    }
+
+}
+
+/**
  * ---------------------------------------------------------------------------------------------------------------------
  * Function
  * ---------------------------------------------------------------------------------------------------------------------
@@ -303,6 +358,7 @@ bool create_message( uint8_t *pBuffer, uint32_t bufLen, command_id_t command_id,
     ++buffer_index;
     // ETX
     pBuffer[ buffer_index ] = ETX_BYTE;
+    ++buffer_index;
 
     // Return values
     *pMsg_len = buffer_index;
@@ -326,7 +382,6 @@ bool is_after( uint32_t check, uint32_t reference )
  */
 bool read_command( command_t *pCommand )
 {
-    static uint8_t  state = WAIT_FOR_STX;
     static uint32_t buffer_index  = 0;
     static uint32_t stx_timestamp = 0;
     command_header_t *pHeader     = (command_header_t *)&cmd_buffer[ 1 ];
@@ -334,6 +389,7 @@ bool read_command( command_t *pCommand )
     // Stateless happenings
     if ( buffer_index + 1 >= sizeof( cmd_buffer ) )
     {
+        send_error( ERROR_BUFFER_FULL );
         // Message too big, buffer full, reset
         state        = WAIT_FOR_STX;
         buffer_index = 0;
@@ -342,6 +398,8 @@ bool read_command( command_t *pCommand )
     // If we time out reading message
     if ( ( buffer_index > 0 ) && ( is_after( millis(), stx_timestamp + COMMAND_TIMEOUT_MS ) ) ) {
         // Command timed out
+        send_error( ERROR_TIMEOUT );
+        Serial.write( buffer_index );
         state        = WAIT_FOR_STX;
         buffer_index = 0;
     }
@@ -385,13 +443,23 @@ bool read_command( command_t *pCommand )
             if ( crc8_calc == pHeader->crc8 )
             {
                 // CRC8 OK
-                state = WAIT_FOR_PAYLOAD;
+                if ( pHeader->length > 0 )
+                {
+                    // We have a payload
+                    state = WAIT_FOR_PAYLOAD;
+                }
+                else
+                {
+                    // No paylaod
+                    state = CHECK_PAYLOAD_CRC8;
+                }
             }
             else
             {
                 // CRC8 failed
                 state        = WAIT_FOR_STX;
                 buffer_index = 0;
+                send_error( ERROR_HEADER_CRC );
             }
         }
         break;
@@ -407,6 +475,7 @@ bool read_command( command_t *pCommand )
                 {
                     state = CHECK_PAYLOAD_CRC8;
                 }
+                Serial.write( buffer_index );
             }
         }
         break;
@@ -430,6 +499,7 @@ bool read_command( command_t *pCommand )
                     // CRC8 failed
                     state        = WAIT_FOR_STX;
                     buffer_index = 0;
+                    send_error( ERROR_MESSAGE_CRC );
                 }
 
             }
