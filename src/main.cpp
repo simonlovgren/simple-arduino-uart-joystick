@@ -399,7 +399,6 @@ bool read_command( command_t *pCommand )
     if ( ( buffer_index > 0 ) && ( is_after( millis(), stx_timestamp + COMMAND_TIMEOUT_MS ) ) ) {
         // Command timed out
         send_error( ERROR_TIMEOUT );
-        Serial.write( buffer_index );
         state        = WAIT_FOR_STX;
         buffer_index = 0;
     }
